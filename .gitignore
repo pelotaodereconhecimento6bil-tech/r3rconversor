@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+saida/
+uploads/
+entrada/
+historico/
+estrutura.txt
