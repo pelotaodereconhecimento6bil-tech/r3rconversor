@@ -39,8 +39,77 @@ def salvar_linhas_nao_processadas(falhas, nome_arquivo="linhas_nao_processadas.t
     caminho = PASTA_SAIDA / nome_arquivo
     with open(caminho, "w", encoding="utf-8") as f:
         for linha in falhas:
-            f.write(linha + "\n")
+            f.write(str(linha) + "\n")
     return caminho
+
+
+def normalizar_cor(valor):
+    """
+    Normaliza a cor para evitar estouro visual na coluna COR do PDF.
+    A ideia é manter apenas a cor base, sem nomes comerciais longos.
+
+    Exemplos:
+    - BRANCO BANCHISA  -> BRANCO
+    - CINZA SILVERSTONE -> CINZA
+    - PRETO VULCANO -> PRETO
+    """
+    if valor is None:
+        return ""
+
+    texto = str(valor).upper().strip()
+
+    if not texto or texto in {"NAN", "NONE", "-"}:
+        return ""
+
+    # Remove resíduos que podem aparecer quando o PDF cola a coluna COR com FIPE.
+    texto = texto.replace("R$", " ")
+    texto = texto.replace("$", " ")
+    texto = " ".join(texto.split())
+
+    mapa = {
+        "BRANCO BANCHISA": "BRANCO",
+        "BRANCO BANQUISE": "BRANCO",
+        "BRANCO ATLAS": "BRANCO",
+        "BRANCO POLAR": "BRANCO",
+        "BRANCO GLACIER": "BRANCO",
+        "BRANCO CRISTAL": "BRANCO",
+        "BRANCA": "BRANCO",
+
+        "PRETO VULCANO": "PRETO",
+        "PRETO ONIX": "PRETO",
+        "PRETO CARBON": "PRETO",
+        "PRETO NACRE": "PRETO",
+        "PRETO OURO": "PRETO",
+        "PRETA": "PRETO",
+
+        "CINZA SILVERSTONE": "CINZA",
+        "CINZA SILK": "CINZA",
+        "CINZA GRANITE": "CINZA",
+        "CINZA PLATINUM": "CINZA",
+        "CINZA ARTENSE": "CINZA",
+
+        "PRATA BRISK": "PRATA",
+        "PRATA BARI": "PRATA",
+        "PRATA SAND": "PRATA",
+        "PRATA ETOILE": "PRATA",
+        "PRATA BILLET": "PRATA",
+
+        "AZUL JAZZ": "AZUL",
+        "AZUL BOREAL": "AZUL",
+        "AZUL SAPPHIRE": "AZUL",
+
+        "VERMELHO CHILI": "VERMELHO",
+        "VERMELHA": "VERMELHO",
+        "VERDE SAFARI": "VERDE",
+        "AMARELA": "AMARELO",
+    }
+
+    for chave, cor_base in mapa.items():
+        if texto.startswith(chave):
+            return cor_base
+
+    # Fallback: mantém só a primeira palavra, que normalmente é a cor base.
+    return texto.split()[0] if texto.split() else ""
 
 
 def estilizar_planilha(ws):
@@ -60,38 +129,60 @@ def estilizar_planilha(ws):
             cell.border = border
             cell.alignment = Alignment(vertical="center")
 
-    larguras = {
-        "A": 14,
-        "B": 42,
-        "C": 8,
-        "D": 8,
-        "E": 12,
-        "F": 18,
-        "G": 16,
-        "H": 8,
-        "I": 24,
-        "J": 16,
-        "K": 18,
-        "L": 14,
+    larguras_por_coluna = {
+        "PLACA": 14,
+        "MODELO": 42,
+        "FAB": 8,
+        "MOD": 8,
+        "KM": 12,
+        "COR": 14,
+        "FIPE": 16,
+        "GANHO IPVA": 16,
+        "UF": 8,
+        "CIDADE": 32,
+        "PREÇO FINAL": 15,
+        "DIST FIPE FINAL": 16,
+        "MARGEM FINAL": 12,
+        "LAUDO CAUTELAR": 16,
+        "LINK LAUDO": 18,
     }
 
-    for col, largura in larguras.items():
-        ws.column_dimensions[col].width = largura
+    header = {cell.value: idx + 1 for idx, cell in enumerate(ws[1])}
+
+    for nome_coluna, largura in larguras_por_coluna.items():
+        col_idx = header.get(nome_coluna)
+        if col_idx:
+            letra = ws.cell(row=1, column=col_idx).column_letter
+            ws.column_dimensions[letra].width = largura
 
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
-    # Destaques visuais solicitados:
-    # PREÇO FINAL em verde, DIST FIPE FINAL em azul e MARGEM FINAL em amarelo.
     fills_colunas = {
-        "J": PatternFill(fill_type="solid", fgColor="C6E0B4"),
-        "K": PatternFill(fill_type="solid", fgColor="BDD7EE"),
-        "L": PatternFill(fill_type="solid", fgColor="FFF2CC"),
+        "PREÇO FINAL": PatternFill(fill_type="solid", fgColor="C6E0B4"),
+        "DIST FIPE FINAL": PatternFill(fill_type="solid", fgColor="BDD7EE"),
+        "MARGEM FINAL": PatternFill(fill_type="solid", fgColor="FFF2CC"),
     }
 
-    for col, fill in fills_colunas.items():
-        for row in range(2, ws.max_row + 1):
-            ws[f"{col}{row}"].fill = fill
+    for nome_coluna, fill in fills_colunas.items():
+        col_idx = header.get(nome_coluna)
+        if col_idx:
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).fill = fill
+
+    colunas_centradas = {
+        "PLACA", "FAB", "MOD", "KM", "COR", "FIPE", "GANHO IPVA", "UF", "CIDADE",
+        "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL", "LAUDO CAUTELAR", "LINK LAUDO",
+    }
+
+    for nome_coluna in colunas_centradas:
+        col_idx = header.get(nome_coluna)
+        if col_idx:
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=col_idx).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                )
 
 
 def aplicar_formatacao_numerica(ws):
@@ -101,7 +192,7 @@ def aplicar_formatacao_numerica(ws):
     formato_percentual = '0.00%'
     formato_texto = '@'
 
-    for nome_coluna in ["FIPE", "PREÇO FINAL", "DIST FIPE FINAL"]:
+    for nome_coluna in ["FIPE", "GANHO IPVA", "PREÇO FINAL", "DIST FIPE FINAL"]:
         col_idx = header.get(nome_coluna)
         if col_idx:
             for row in range(2, ws.max_row + 1):
@@ -129,6 +220,10 @@ def salvar_excel(df: pd.DataFrame, nome_arquivo=None):
         nome_arquivo = f"resultado_atualizado_{timestamp}.xlsx"
 
     df = sanitizar_dataframe_saida(df)
+
+    if "COR" in df.columns:
+        df["COR"] = df["COR"].apply(normalizar_cor)
+
     caminho_saida = PASTA_SAIDA / nome_arquivo
 
     with pd.ExcelWriter(caminho_saida, engine="openpyxl") as writer:
@@ -153,18 +248,26 @@ def salvar_excel(df: pd.DataFrame, nome_arquivo=None):
 def preparar_dados_pdf(df: pd.DataFrame):
     df_pdf = sanitizar_dataframe_saida(df.copy())
 
-    df_pdf["KM"] = df_pdf["KM"].apply(
-        lambda x: f"{int(x):,}".replace(",", ".") if pd.notna(x) else ""
-    )
+    if "KM" in df_pdf.columns:
+        df_pdf["KM"] = df_pdf["KM"].apply(
+            lambda x: f"{int(float(x)):,}".replace(",", ".") if pd.notna(x) and str(x).strip() != "" else ""
+        )
 
-    for c in ["FIPE", "PREÇO FINAL", "DIST FIPE FINAL"]:
-        df_pdf[c] = df_pdf[c].apply(formatar_moeda_br)
+    for c in ["FIPE", "GANHO IPVA", "PREÇO FINAL", "DIST FIPE FINAL"]:
+        if c in df_pdf.columns:
+            df_pdf[c] = df_pdf[c].apply(formatar_moeda_br)
 
-    df_pdf["MARGEM FINAL"] = df_pdf["MARGEM FINAL"].apply(formatar_percentual_br)
+    if "MARGEM FINAL" in df_pdf.columns:
+        df_pdf["MARGEM FINAL"] = df_pdf["MARGEM FINAL"].apply(formatar_percentual_br)
 
-    df_pdf["MODELO"] = df_pdf["MODELO"].fillna("").astype(str).str.strip().str.slice(0, 42)
-    df_pdf["COR"] = df_pdf["COR"].fillna("").astype(str).str.strip().str.slice(0, 22)
-    df_pdf["CIDADE"] = df_pdf["CIDADE"].fillna("").astype(str).str.strip().str.slice(0, 24)
+    if "MODELO" in df_pdf.columns:
+        df_pdf["MODELO"] = df_pdf["MODELO"].fillna("").astype(str).str.strip().str.slice(0, 42)
+
+    if "COR" in df_pdf.columns:
+        df_pdf["COR"] = df_pdf["COR"].apply(normalizar_cor)
+
+    if "CIDADE" in df_pdf.columns:
+        df_pdf["CIDADE"] = df_pdf["CIDADE"].fillna("").astype(str).str.strip().str.slice(0, 34)
 
     return df_pdf
 
@@ -187,8 +290,8 @@ def _estilos_pdf():
             "header",
             parent=styles["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=6.6,
-            leading=7.8,
+            fontSize=6.2,
+            leading=7.2,
             alignment=TA_CENTER,
             spaceAfter=0,
             spaceBefore=0,
@@ -197,8 +300,8 @@ def _estilos_pdf():
             "texto",
             parent=styles["Normal"],
             fontName="Helvetica",
-            fontSize=6.5,
-            leading=7.6,
+            fontSize=6.2,
+            leading=7.2,
             alignment=TA_LEFT,
             spaceAfter=0,
             spaceBefore=0,
@@ -207,11 +310,24 @@ def _estilos_pdf():
             "centro",
             parent=styles["Normal"],
             fontName="Helvetica",
-            fontSize=6.5,
-            leading=7.6,
+            fontSize=6.2,
+            leading=7.2,
             alignment=TA_CENTER,
             spaceAfter=0,
             spaceBefore=0,
+        ),
+        # Fonte menor só para a coluna COR.
+        # Essa é a trava principal contra invasão da coluna FIPE.
+        "cor": ParagraphStyle(
+            "cor",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=5.0,
+            leading=5.6,
+            alignment=TA_CENTER,
+            spaceAfter=0,
+            spaceBefore=0,
+            wordWrap="CJK",
         ),
     }
 
@@ -240,7 +356,111 @@ def _celula_logo(estilos):
     return Paragraph("R3R INTERMEDIAÇÕES", estilos["logo_texto"])
 
 
-def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
+def _detectar_origem_pdf(df: pd.DataFrame) -> str:
+    """
+    Detecta a origem provável da tabela para aplicar larguras específicas.
+
+    Mantém compatibilidade com qualquer parser:
+    - Localiza IPVA costuma ter GANHO IPVA.
+    - Movida costuma trazer LAUDO CAUTELAR / LINK LAUDO.
+    - Unidas fica como layout próprio quando não há marcadores específicos.
+    """
+    try:
+        for chave in ("origem", "modo", "parser", "fonte"):
+            valor = str(df.attrs.get(chave, "") or "").lower()
+            if "localiza" in valor:
+                return "localiza"
+            if "movida" in valor:
+                return "movida"
+            if "unidas" in valor:
+                return "unidas"
+
+        colunas = {str(c).upper().strip() for c in df.columns}
+
+        if "LAUDO CAUTELAR" in colunas or "LINK LAUDO" in colunas:
+            return "movida"
+
+        if "GANHO IPVA" in colunas:
+            return "localiza"
+
+        if "ARQUIVO ORIGEM" in colunas:
+            texto_origem = " ".join(df.get("ARQUIVO ORIGEM", pd.Series(dtype=str)).astype(str).head(20)).lower()
+            if "localiza" in texto_origem:
+                return "localiza"
+            if "movida" in texto_origem:
+                return "movida"
+            if "unidas" in texto_origem:
+                return "unidas"
+
+        return "unidas"
+    except Exception:
+        return "geral"
+
+
+def _larguras_pdf_por_coluna(colunas, origem=None):
+    """Define larguras por nome de coluna e otimiza o layout por origem."""
+    origem = str(origem or "geral").lower().strip()
+
+    mapa_base = {
+        "ARQUIVO ORIGEM": 24 * mm,
+        "PLACA": 15 * mm,
+        "MODELO": 45 * mm,
+        "FAB": 8 * mm,
+        "MOD": 8 * mm,
+        "KM": 11 * mm,
+        "COR": 18 * mm,
+        "FIPE": 21 * mm,
+        "GANHO IPVA": 21 * mm,
+        "UF": 7 * mm,
+        "CIDADE": 30 * mm,
+        "PREÇO FINAL": 21 * mm,
+        "DIST FIPE FINAL": 20 * mm,
+        "MARGEM FINAL": 14 * mm,
+        "LAUDO CAUTELAR": 15 * mm,
+        "LINK LAUDO": 22 * mm,
+    }
+
+    ajustes_por_origem = {
+        # Localiza IPVA: precisa preservar cidade composta e compactar colunas financeiras.
+        "localiza": {
+            "MODELO": 43 * mm,
+            "COR": 17 * mm,
+            "FIPE": 21 * mm,
+            "GANHO IPVA": 20 * mm,
+            "CIDADE": 38 * mm,
+            "PREÇO FINAL": 19 * mm,
+            "DIST FIPE FINAL": 19 * mm,
+            "MARGEM FINAL": 13 * mm,
+        },
+        # Movida: normalmente exige espaço para laudo/link, então o ajuste é menos agressivo.
+        "movida": {
+            "MODELO": 43 * mm,
+            "COR": 17 * mm,
+            "CIDADE": 30 * mm,
+            "PREÇO FINAL": 21 * mm,
+            "DIST FIPE FINAL": 20 * mm,
+            "MARGEM FINAL": 14 * mm,
+            "LAUDO CAUTELAR": 17 * mm,
+            "LINK LAUDO": 24 * mm,
+        },
+        # Unidas: tabela tende a ser mais compacta, mas cidade ainda recebe folga.
+        "unidas": {
+            "MODELO": 46 * mm,
+            "COR": 17 * mm,
+            "CIDADE": 32 * mm,
+            "PREÇO FINAL": 20 * mm,
+            "DIST FIPE FINAL": 20 * mm,
+            "MARGEM FINAL": 14 * mm,
+        },
+    }
+
+    mapa = dict(mapa_base)
+    mapa.update(ajustes_por_origem.get(origem, {}))
+
+    return [mapa.get(coluna, 18 * mm) for coluna in colunas]
+
+
+def salvar_pdf(df: pd.DataFrame, nome_arquivo=None, origem=None):
     if nome_arquivo is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         nome_arquivo = f"resultado_atualizado_{timestamp}.pdf"
@@ -263,30 +483,31 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
 
     largura_util = largura_pagina - (margem_lateral * 2)
 
-    col_widths = [
-        15 * mm, 45 * mm, 9 * mm, 9 * mm, 12 * mm, 22 * mm,
-        20 * mm, 9 * mm, 25 * mm, 24 * mm, 25 * mm, 16 * mm,
-    ]
+    origem_layout = origem or _detectar_origem_pdf(df_pdf)
+    col_widths = _larguras_pdf_por_coluna(list(df_pdf.columns), origem=origem_layout)
     escala = largura_util / sum(col_widths)
     col_widths = [w * escala for w in col_widths]
 
     elementos = []
-
-    linhas_por_pagina = 31
+    linhas_por_pagina = 30
 
     cabecalho = [_para(col, estilos["header"]) for col in df_pdf.columns]
 
     colunas_centradas = {
-        "PLACA", "FAB", "MOD", "KM", "FIPE", "UF",
-        "CIDADE", "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL"
+        "PLACA", "FAB", "MOD", "KM", "FIPE", "GANHO IPVA", "UF",
+        "CIDADE", "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL",
+        "LAUDO CAUTELAR", "LINK LAUDO",
     }
 
     registros = []
     for _, row in df_pdf.iterrows():
         linha = []
         for coluna in df_pdf.columns:
-            estilo = estilos["centro"] if coluna in colunas_centradas else estilos["texto"]
-            linha.append(_para(row[coluna], estilo))
+            if coluna == "COR":
+                linha.append(_para(row[coluna], estilos["cor"]))
+            else:
+                estilo = estilos["centro"] if coluna in colunas_centradas else estilos["texto"]
+                linha.append(_para(row[coluna], estilo))
         registros.append(linha)
 
     for inicio in range(0, len(registros), linhas_por_pagina):
@@ -297,7 +518,7 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
 
         tabela = Table(dados_tabela, colWidths=col_widths, repeatRows=2)
 
-        tabela.setStyle(TableStyle([
+        estilo_tabela = [
             ("SPAN", (0, 0), (-1, 0)),
             ("ALIGN", (0, 0), (-1, 0), "CENTER"),
             ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
@@ -309,22 +530,29 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
             ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#D9D9D9")),
             ("TEXTCOLOR", (0, 1), (-1, 1), colors.black),
 
-            ("BACKGROUND", (9, 2), (9, -1), colors.HexColor("#C6E0B4")),
-            ("BACKGROUND", (10, 2), (10, -1), colors.HexColor("#BDD7EE")),
-            ("BACKGROUND", (11, 2), (11, -1), colors.HexColor("#FFF2CC")),
-
             ("VALIGN", (0, 1), (-1, -1), "MIDDLE"),
             ("GRID", (0, 1), (-1, -1), 0.40, colors.black),
             ("LINEBELOW", (0, 1), (-1, 1), 0.55, colors.black),
 
-            ("LEFTPADDING", (0, 1), (-1, -1), 1.4),
-            ("RIGHTPADDING", (0, 1), (-1, -1), 1.4),
-            ("TOPPADDING", (0, 1), (-1, -1), 2.0),
-            ("BOTTOMPADDING", (0, 1), (-1, -1), 2.0),
+            ("LEFTPADDING", (0, 1), (-1, -1), 1.2),
+            ("RIGHTPADDING", (0, 1), (-1, -1), 1.2),
+            ("TOPPADDING", (0, 1), (-1, -1), 1.8),
+            ("BOTTOMPADDING", (0, 1), (-1, -1), 1.8),
 
-            ("ROWBACKGROUNDS", (0, 2), (8, -1), [colors.white, colors.HexColor("#F7F7F7")]),
-        ]))
+            ("ROWBACKGROUNDS", (0, 2), (-1, -1), [colors.white, colors.HexColor("#F7F7F7")]),
+        ]
 
+        # Destaques por nome da coluna, não por posição fixa.
+        for nome_coluna, cor_fundo in {
+            "PREÇO FINAL": "#C6E0B4",
+            "DIST FIPE FINAL": "#BDD7EE",
+            "MARGEM FINAL": "#FFF2CC",
+        }.items():
+            if nome_coluna in df_pdf.columns:
+                idx = list(df_pdf.columns).index(nome_coluna)
+                estilo_tabela.append(("BACKGROUND", (idx, 2), (idx, -1), colors.HexColor(cor_fundo)))
+
+        tabela.setStyle(TableStyle(estilo_tabela))
         elementos.append(tabela)
 
         if inicio + linhas_por_pagina < len(registros):

@@ -18,6 +18,8 @@ from core.normalizador import (
     limpar_cidade,
 )
 import shutil
+import io
+import zipfile
 from xml.sax.saxutils import escape
 
 import pandas as pd
@@ -83,8 +85,8 @@ MAPA_COLUNAS_EQUIVALENTES = {
     "margem fipe": "MARGEM_FIPE",
     "% margem": "MARGEM_FIPE",
     "margem %": "MARGEM_FIPE",
-    "ganho ipva": "IPVA",
-    "ipva": "IPVA",
+    "ganho ipva": "GANHO IPVA",
+    "ipva": "GANHO IPVA",
     "uf": "UF",
     "cidade": "CIDADE",
     "endereco": "ENDERECO",
@@ -555,8 +557,30 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
         melhores_colunas,
     )
 
+def _coluna_tem_valor_real(df: pd.DataFrame, coluna: str) -> bool:
+    """Retorna True quando a coluna existe e tem pelo menos um valor real.
+
+    Usado para impedir que colunas opcionais, como GANHO IPVA,
+    sejam criadas artificialmente em listas Movida/Unidas.
+    """
+    if coluna not in df.columns:
+        return False
+
+    serie = df[coluna]
+    if serie.empty:
+        return False
+
+    serie_txt = serie.fillna("").astype(str).str.strip()
+    serie_txt = serie_txt.replace({"nan": "", "None": "", "NONE": "", "NaN": ""})
+
+    return bool(serie_txt.ne("").any())
+
+
 def aplicar_regras(df: pd.DataFrame, percentual: float = 4.0):
     df = df.copy()
+
+    # GANHO IPVA é opcional. Só deve permanecer se realmente veio do arquivo.
+    ganho_ipva_presente = _coluna_tem_valor_real(df, "GANHO IPVA")
 
     # Regra central: para Movida/Unidas, PREÇO ORIGINAL vem do preço base extraído.
     # As margens originais são ignoradas; a saída é sempre recalculada pelo percentual escolhido.
@@ -585,6 +609,20 @@ def aplicar_regras(df: pd.DataFrame, percentual: float = 4.0):
             df.drop(columns=[coluna], inplace=True)
 
     colunas_saida = list(COLUNAS_FINAIS)
+
+    # Se constantes.py ainda tiver GANHO IPVA, remove quando não veio da origem.
+    # Se constantes.py não tiver, insere somente quando veio da origem.
+    if ganho_ipva_presente:
+        if "GANHO IPVA" not in colunas_saida:
+            if "FIPE" in colunas_saida:
+                colunas_saida.insert(colunas_saida.index("FIPE") + 1, "GANHO IPVA")
+            else:
+                colunas_saida.append("GANHO IPVA")
+    else:
+        if "GANHO IPVA" in colunas_saida:
+            colunas_saida.remove("GANHO IPVA")
+        if "GANHO IPVA" in df.columns:
+            df.drop(columns=["GANHO IPVA"], inplace=True)
 
     origem = ""
     if "ORIGEM" in df.columns and not df["ORIGEM"].dropna().empty:
@@ -636,6 +674,7 @@ def estilizar_planilha(ws):
             cell.alignment = Alignment(vertical="center")
 
     larguras = {
+        "ARQUIVO ORIGEM": 28,
         "PLACA": 14,
         "MODELO": 42,
         "FAB": 8,
@@ -643,6 +682,7 @@ def estilizar_planilha(ws):
         "KM": 12,
         "COR": 18,
         "FIPE": 16,
+        "GANHO IPVA": 16,
         "UF": 8,
         "CIDADE": 24,
         "PREÇO FINAL": 16,
@@ -675,8 +715,14 @@ def estilizar_planilha(ws):
             for row in range(2, ws.max_row + 1):
                 ws.cell(row=row, column=col_idx).fill = fill
 
+    # FIPE em negrito no Excel, sem alterar cálculos nem outras colunas.
+    col_fipe = header.get("FIPE")
+    if col_fipe:
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=col_fipe).font = Font(bold=True)
+
     for nome_coluna in [
-        "PLACA", "FAB", "MOD", "KM", "UF", "FIPE",
+        "ARQUIVO ORIGEM", "PLACA", "FAB", "MOD", "KM", "UF", "FIPE", "GANHO IPVA",
         "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL",
         "LAUDO CAUTELAR", "LINK LAUDO",
     ]:
@@ -692,7 +738,7 @@ def estilizar_planilha(ws):
 def aplicar_formatacao_numerica(ws):
     header = {cell.value: idx + 1 for idx, cell in enumerate(ws[1])}
 
-    colunas_moeda = ["FIPE", "PREÇO FINAL", "DIST FIPE FINAL"]
+    colunas_moeda = ["FIPE", "GANHO IPVA", "PREÇO FINAL", "DIST FIPE FINAL"]
     colunas_percentual = ["MARGEM FINAL"]
 
     formato_moeda = 'R$ #,##0.00'
@@ -770,6 +816,72 @@ def salvar_excel(df: pd.DataFrame, nome_arquivo=None):
 
     return caminho_saida
 
+
+def normalizar_cor_pdf(valor):
+    """Reduz nomes comerciais de cor para evitar invasão no PDF.
+
+    Ex.: BRANCO BANCHISA -> BRANCO; CINZA SILVERSTONE -> CINZA.
+    Mantém apenas a cor base, sem alterar cálculo nem Excel.
+    """
+    texto = str(valor or "").upper().strip()
+    texto = " ".join(texto.split())
+
+    if not texto:
+        return ""
+
+    # Correção de casos onde o extrator juntou a cor com o próximo campo monetário.
+    texto = texto.replace("R$", "")
+    texto = texto.replace("SILVERSTONER", "SILVERSTONE")
+
+    mapa_cores = {
+        "BRANCO BANCHISA": "BRANCO",
+        "BRANCO BANQUISE": "BRANCO",
+        "BRANCO ATLAS": "BRANCO",
+        "BRANCO POLAR": "BRANCO",
+        "BRANCO GLACIER": "BRANCO",
+        "BRANCO CRISTAL": "BRANCO",
+        "PRETO VULCANO": "PRETO",
+        "PRETO ONIX": "PRETO",
+        "PRETO CARBON": "PRETO",
+        "PRETO NACRE": "PRETO",
+        "PRETO OURO": "PRETO",
+        "PRETO OURO NEGRO": "PRETO",
+        "CINZA SILVERSTONE": "CINZA",
+        "CINZA SILVERSTONER": "CINZA",
+        "CINZA SILK": "CINZA",
+        "CINZA GRANITE": "CINZA",
+        "CINZA PLATINUM": "CINZA",
+        "CINZA ARTENSE": "CINZA",
+        "PRATA BRISK": "PRATA",
+        "PRATA BARI": "PRATA",
+        "PRATA SAND": "PRATA",
+        "PRATA ETOILE": "PRATA",
+        "PRATA BILLET": "PRATA",
+        "AZUL JAZZ": "AZUL",
+        "AZUL BOREAL": "AZUL",
+        "AZUL SAPPHIRE": "AZUL",
+        "AZUL ECLIPSE": "AZUL",
+        "VERMELHO CHILI": "VERMELHO",
+        "VERDE SAFARI": "VERDE",
+        "AMARELA": "AMARELO",
+    }
+
+    if texto in mapa_cores:
+        return mapa_cores[texto]
+
+    # Fallback: conserva apenas a cor base quando vier com nome comercial.
+    primeira = texto.split()[0]
+    cores_base = {
+        "BRANCO", "BRANCA", "PRETO", "PRETA", "CINZA", "PRATA",
+        "AZUL", "VERMELHO", "VERMELHA", "VERDE", "AMARELO", "AMARELA",
+        "MARROM"
+    }
+
+    if primeira in cores_base:
+        return primeira.replace("BRANCA", "BRANCO").replace("PRETA", "PRETO").replace("VERMELHA", "VERMELHO").replace("AMARELA", "AMARELO")
+
+    return texto[:10]
+
 def preparar_dados_pdf(df: pd.DataFrame):
     df_pdf = df.copy()
 
@@ -788,7 +900,7 @@ def preparar_dados_pdf(df: pd.DataFrame):
 
         df_pdf["KM"] = df_pdf["KM"].apply(formatar_km_pdf)
 
-    for coluna in ["FIPE", "PREÇO FINAL", "DIST FIPE FINAL"]:
+    for coluna in ["FIPE", "GANHO IPVA", "PREÇO FINAL", "DIST FIPE FINAL"]:
         if coluna in df_pdf.columns:
             df_pdf[coluna] = df_pdf[coluna].apply(formatar_moeda_br)
 
@@ -810,7 +922,7 @@ def preparar_dados_pdf(df: pd.DataFrame):
             .fillna("")
             .astype(str)
             .str.strip()
-            .apply(lambda x: " ".join(str(x).split()[:2]))
+            .apply(normalizar_cor_pdf)
         )
 
     if "CIDADE" in df_pdf.columns:
@@ -888,6 +1000,11 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
             "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL",
             "LAUDO CAUTELAR", "LINK LAUDO",
         ]
+
+        # GANHO IPVA só entra no PDF se realmente existir no DataFrame.
+        if _coluna_tem_valor_real(df_pdf, "GANHO IPVA"):
+            colunas_pdf.insert(colunas_pdf.index("PREÇO FINAL"), "GANHO IPVA")
+
         for coluna in colunas_pdf:
             if coluna not in df_pdf.columns:
                 df_pdf[coluna] = ""
@@ -919,13 +1036,15 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
     # Largura dinâmica por nome da coluna.
     # Isso evita desalinhamento quando UF/CIDADE são removidas na Unidas/Movida.
     larguras_por_coluna = {
+        "ARQUIVO ORIGEM": 26 * mm,
         "PLACA": 15 * mm,
         "MODELO": 58 * mm,
         "FAB": 8 * mm,
         "MOD": 8 * mm,
         "KM": 11 * mm,
-        "COR": 20 * mm,
+        "COR": 18 * mm,
         "FIPE": 24 * mm,
+        "GANHO IPVA": 24 * mm,
         "UF": 7 * mm,
         "CIDADE": 24 * mm,
         "PREÇO FINAL": 34 * mm,
@@ -1009,7 +1128,7 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
                 estilos.append(("BACKGROUND", (idx_col, 1), (idx_col, -1), colors.HexColor(cor_fundo)))
 
         for nome_coluna in [
-            "PLACA", "FAB", "MOD", "KM", "FIPE", "UF",
+            "ARQUIVO ORIGEM", "PLACA", "FAB", "MOD", "KM", "FIPE", "GANHO IPVA", "UF",
             "PREÇO FINAL", "DIST FIPE FINAL", "MARGEM FINAL",
             "LAUDO CAUTELAR", "LINK LAUDO",
         ]:
@@ -1017,10 +1136,21 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
                 idx_col = cabecalho.index(nome_coluna)
                 estilos.append(("ALIGN", (idx_col, 1), (idx_col, -1), "CENTER"))
 
+        # FIPE em negrito no PDF para todos os modelos, usando nome da coluna.
+        if "FIPE" in cabecalho:
+            idx_fipe = cabecalho.index("FIPE")
+            estilos.append(("FONTNAME", (idx_fipe, 1), (idx_fipe, -1), "Helvetica-Bold"))
+
         for nome_coluna in ["MODELO", "COR"]:
             if nome_coluna in cabecalho:
                 idx_col = cabecalho.index(nome_coluna)
                 estilos.append(("ALIGN", (idx_col, 1), (idx_col, -1), "LEFT"))
+
+        if "COR" in cabecalho:
+            idx_cor = cabecalho.index("COR")
+            estilos.append(("FONTSIZE", (idx_cor, 1), (idx_cor, -1), 5.6))
+            estilos.append(("LEADING", (idx_cor, 1), (idx_cor, -1), 6.4))
+            estilos.append(("ALIGN", (idx_cor, 1), (idx_cor, -1), "CENTER"))
 
         tabela.setStyle(TableStyle(estilos))
         elementos.append(tabela)
@@ -1047,6 +1177,9 @@ MAPA_COLUNAS_EXCEL = {
     "quilometragem": "KM",
     "cor": "COR",
     "fipe": "FIPE",
+    "ganho ipva": "GANHO IPVA",
+    "ganho do ipva": "GANHO IPVA",
+    "ipva": "GANHO IPVA",
     "uf": "UF",
     "cidade": "CIDADE",
     "preco": "PREÇO ORIGINAL",
@@ -1151,7 +1284,7 @@ def padronizar_excel(df: pd.DataFrame) -> pd.DataFrame:
     if "PREÇO ORIGINAL" not in df.columns and "PREÇO_FINAL_INFORMADO" not in df.columns:
         raise ValueError("A planilha precisa ter coluna de preço, valor, preço original ou preço final.")
 
-    for coluna in ["FIPE", "PREÇO ORIGINAL", "PREÇO_FINAL_INFORMADO"]:
+    for coluna in ["FIPE", "GANHO IPVA", "PREÇO ORIGINAL", "PREÇO_FINAL_INFORMADO"]:
         if coluna in df.columns:
             df[coluna] = df[coluna].apply(limpar_valor_monetario)
 
@@ -1170,6 +1303,9 @@ def padronizar_excel(df: pd.DataFrame) -> pd.DataFrame:
         "PLACA", "MODELO", "FAB", "MOD", "KM", "COR",
         "FIPE", "UF", "CIDADE"
     ]
+
+    if "GANHO IPVA" in df.columns:
+        colunas_base.append("GANHO IPVA")
 
     if "PREÇO ORIGINAL" in df.columns:
         colunas_base.append("PREÇO ORIGINAL")
@@ -1478,6 +1614,27 @@ def renderizar_historico_uploads():
             st.rerun()
 
 
+def _renderizar_previa_historico_excel(caminho_excel: Path, chave: str):
+    """Mostra uma prévia rápida do Excel já convertido no histórico."""
+    if not caminho_excel or not Path(caminho_excel).exists():
+        st.caption("Prévia indisponível: Excel não encontrado.")
+        return
+
+    try:
+        df_prev = pd.read_excel(caminho_excel)
+    except Exception as e:
+        st.warning(f"Não foi possível abrir a prévia deste arquivo: {e}")
+        return
+
+    if df_prev.empty:
+        st.caption("Arquivo sem registros para pré-visualização.")
+        return
+
+    total = len(df_prev)
+    st.caption(f"Pré-visualização: {min(total, 50)} de {total} registro(s).")
+    st.dataframe(df_prev.head(50), use_container_width=True, height=260)
+
+
 def renderizar_historico():
     with st.expander("📊 Histórico de arquivos convertidos — últimos 10 dias", expanded=False):
         itens = listar_historico()
@@ -1526,7 +1683,7 @@ def renderizar_historico():
             chave = f"selecionar_historico_{pasta.name}"
 
             with st.container(border=True):
-                col_sel, col_info, col_download = st.columns([0.05, 0.55, 0.40])
+                col_sel, col_info, col_download = st.columns([0.05, 0.50, 0.45])
 
                 with col_sel:
                     marcado = st.checkbox(
@@ -1551,7 +1708,7 @@ def renderizar_historico():
                     )
 
                 with col_download:
-                    col_excel, col_pdf = st.columns(2)
+                    col_prev, col_excel, col_pdf = st.columns([1.1, 1, 1])
 
                     if item["excel"] and item["excel"].exists():
                         excel_bytes = ler_bytes(item["excel"])
@@ -1577,6 +1734,18 @@ def renderizar_historico():
                                 use_container_width=True,
                             )
 
+                    with col_prev:
+                        abrir_previa = st.toggle(
+                            "Prévia",
+                            key=f"toggle_previa_{pasta.name}",
+                        )
+
+                if abrir_previa:
+                    _renderizar_previa_historico_excel(
+                        item.get("excel"),
+                        chave=f"previa_{pasta.name}",
+                    )
+
                 if marcado:
                     selecionados.append(pasta)
 
@@ -1599,9 +1768,10 @@ def renderizar_historico():
             for pasta in selecionados:
                 pasta = Path(pasta)
                 st.session_state.pop(f"selecionar_historico_{pasta.name}", None)
+                st.session_state.pop(f"toggle_previa_{pasta.name}", None)
 
                 if (excel_atual and pasta in excel_atual.parents) or (pdf_atual and pasta in pdf_atual.parents):
-                    for chave_estado in ["df_final", "info", "excel", "pdf", "nome_saida", "percentual"]:
+                    for chave_estado in ["df_final", "info", "excel", "pdf", "nome_saida", "percentual", "resumo_processamento"]:
                         st.session_state.pop(chave_estado, None)
 
             st.success(f"{qtd} item(ns) excluído(s) do histórico.")
@@ -1649,6 +1819,60 @@ def renderizar_falhas_processamento(falhas):
                 if len(linhas) > 3:
                     st.caption(f"+ {len(linhas) - 3} ocorrência(s) adicional(is) dessa placa.")
 
+
+
+
+def montar_zip_resultados_individuais(resultados, tipo="todos"):
+    """
+    Monta um ZIP com os arquivos individuais, respeitando os nomes editados na tela.
+
+    tipo:
+    - "excel": inclui somente arquivos .xlsx
+    - "pdf": inclui somente arquivos .pdf
+    - "todos": inclui Excel + PDF
+    """
+    buffer = io.BytesIO()
+    nomes_usados = {}
+    tipo = str(tipo or "todos").lower().strip()
+
+    if tipo not in {"excel", "pdf", "todos"}:
+        tipo = "todos"
+
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+        for idx_resultado, resultado in enumerate(resultados or []):
+            df_final = resultado.get("df_final")
+
+            if not isinstance(df_final, pd.DataFrame) or df_final.empty:
+                continue
+
+            arquivo_original = resultado.get("arquivo_original", "arquivo")
+            nome_padrao = resultado.get("nome_saida", Path(arquivo_original).stem)
+            chave_nome_download = f"nome_download_resultado_{idx_resultado}_{nome_seguro(arquivo_original)}"
+            nome_download = nome_seguro(st.session_state.get(chave_nome_download, nome_padrao))
+
+            qtd_nome = nomes_usados.get(nome_download, 0) + 1
+            nomes_usados[nome_download] = qtd_nome
+
+            if qtd_nome > 1:
+                nome_download_zip = f"{nome_download}_{qtd_nome}"
+            else:
+                nome_download_zip = nome_download
+
+            caminho_excel = Path(resultado["excel"]) if resultado.get("excel") else None
+            caminho_pdf = Path(resultado["pdf"]) if resultado.get("pdf") else None
+
+            excel_bytes = ler_bytes(caminho_excel) if caminho_excel else None
+            pdf_bytes = ler_bytes(caminho_pdf) if caminho_pdf else None
+
+            if tipo in {"excel", "todos"} and excel_bytes:
+                zipf.writestr(f"{nome_download_zip}.xlsx", excel_bytes)
+
+            if tipo in {"pdf", "todos"} and pdf_bytes:
+                zipf.writestr(f"{nome_download_zip}.pdf", pdf_bytes)
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def main():
     st.set_page_config(
         page_title="R3R Intermediações",
@@ -1656,7 +1880,6 @@ def main():
         layout="wide",
     )
 
-    # Oculta a sidebar e o botão lateral enquanto a página inicial está em formato landing.
     st.markdown(
         """
         <style>
@@ -1687,7 +1910,6 @@ def main():
 
     with col1:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
         banner_path = Path("assets/text_icon.png")
 
         if banner_path.exists():
@@ -1697,7 +1919,6 @@ def main():
 
     with col2:
         st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-
         logo_path = obter_logo_streamlit_path()
 
         if logo_path:
@@ -1719,96 +1940,227 @@ def main():
         st.caption("Esse percentual será usado para recalcular preço final, distância FIPE e margem final.")
 
     with st.container(border=True):
-
-        st.markdown("### 📤 Arquivo de entrada")
-
+        st.markdown("### 📤 Arquivos de entrada")
         st.caption(
-            "Envie a tabela base em PDF, XLSX ou XLS para iniciar o processamento."
+            "Envie uma ou mais tabelas em PDF, XLSX ou XLS. "
+            "Cada arquivo será convertido individualmente, com prévia, nome próprio e downloads separados."
         )
 
-        uploaded_file = st.file_uploader(
-            "Selecione ou arraste o arquivo aqui",
+        uploaded_files = st.file_uploader(
+            "Selecione ou arraste o(s) arquivo(s) aqui",
             type=["pdf", "xlsx", "xls"],
-            help="Envie o PDF base ou uma planilha Excel já estruturada.",
+            accept_multiple_files=True,
+            help="Envie um ou mais PDFs/planilhas. O sistema processará cada lista separadamente.",
             label_visibility="collapsed",
         )
 
-        if uploaded_file:
-            st.success(f"Arquivo carregado: {uploaded_file.name}")
+        if uploaded_files:
+            st.success(f"{len(uploaded_files)} arquivo(s) carregado(s).")
+            with st.expander("Ver arquivos selecionados", expanded=False):
+                for arquivo in uploaded_files:
+                    st.caption(f"• {arquivo.name}")
 
-    if not uploaded_file:
+    if not uploaded_files:
         st.info("Envie um arquivo para iniciar.")
         renderizar_historico()
         return
 
-    nome_padrao = Path(uploaded_file.name).stem
     with st.container(border=True):
-
-        st.markdown("### ⬇️ Nome do arquivo para download")
-
+        st.markdown("### ⬇️ Nome individual de cada lista")
         st.caption(
-            "Defina como os arquivos exportados em Excel e PDF serão salvos."
+            "Defina o nome final de cada conversão antes de gerar os arquivos. "
+            "Cada item terá seu próprio Excel e PDF."
         )
 
-        nome_saida = st.text_input(
-            "Nome do arquivo",
-            value=f"{nome_padrao}_margem_atualizada",
-            label_visibility="collapsed",
-            placeholder="Digite o nome do arquivo final",
+        nomes_saida_por_arquivo = []
+
+        for idx_arquivo, arquivo in enumerate(uploaded_files):
+            nome_base = Path(arquivo.name).stem
+            chave_nome = f"nome_saida_individual_{idx_arquivo}_{nome_seguro(arquivo.name)}"
+
+            nome_digitado = st.text_input(
+                f"Nome final — {arquivo.name}",
+                value=f"{nome_base}_margem_atualizada",
+                key=chave_nome,
+                placeholder="Digite o nome final desta lista",
+            )
+
+            nomes_saida_por_arquivo.append(nome_seguro(nome_digitado))
+
+    if st.button("Gerar listas individuais com margem", type="primary", use_container_width=True):
+        resultados_individuais = []
+        resumo_processamento = []
+        nomes_usados = {}
+
+        with st.spinner("Processando arquivo(s) individualmente..."):
+            for idx_arquivo, arquivo in enumerate(uploaded_files):
+                nome_saida = nomes_saida_por_arquivo[idx_arquivo]
+
+                # Evita sobrescrever arquivos caso dois nomes finais sejam iguais no mesmo lote.
+                qtd_nome = nomes_usados.get(nome_saida, 0) + 1
+                nomes_usados[nome_saida] = qtd_nome
+                if qtd_nome > 1:
+                    nome_saida = f"{nome_saida}_{qtd_nome}"
+
+                try:
+                    caminho_upload = salvar_upload(arquivo)
+                    df_final, info = processar_arquivo(
+                        caminho_upload,
+                        percentual=percentual,
+                    )
+
+                    falhas = info.get("falhas", []) or []
+
+                    if df_final.empty:
+                        resumo_processamento.append({
+                            "ARQUIVO": arquivo.name,
+                            "NOME FINAL": nome_saida,
+                            "MODO": str(info.get("modo", "-")).upper(),
+                            "REGISTROS": 0,
+                            "FALHAS": len(falhas),
+                            "STATUS": "SEM REGISTROS",
+                        })
+
+                        resultados_individuais.append({
+                            "arquivo_original": arquivo.name,
+                            "nome_saida": nome_saida,
+                            "df_final": pd.DataFrame(),
+                            "info": info,
+                            "excel": None,
+                            "pdf": None,
+                            "erro": None,
+                        })
+                        continue
+
+                    caminho_excel = salvar_excel(df_final, nome_arquivo=f"{nome_saida}.xlsx")
+                    caminho_pdf = salvar_pdf(df_final, nome_arquivo=f"{nome_saida}.pdf")
+                    hist_excel, hist_pdf = salvar_historico(caminho_excel, caminho_pdf, nome_saida)
+
+                    resumo_processamento.append({
+                        "ARQUIVO": arquivo.name,
+                        "NOME FINAL": nome_saida,
+                        "MODO": str(info.get("modo", "-")).upper(),
+                        "REGISTROS": len(df_final),
+                        "FALHAS": len(falhas),
+                        "STATUS": "OK",
+                    })
+
+                    resultados_individuais.append({
+                        "arquivo_original": arquivo.name,
+                        "nome_saida": nome_saida,
+                        "df_final": df_final,
+                        "info": info,
+                        "excel": str(hist_excel),
+                        "pdf": str(hist_pdf),
+                        "erro": None,
+                    })
+
+                except Exception as erro_arquivo:
+                    resumo_processamento.append({
+                        "ARQUIVO": arquivo.name,
+                        "NOME FINAL": nome_saida,
+                        "MODO": "ERRO",
+                        "REGISTROS": 0,
+                        "FALHAS": 1,
+                        "STATUS": str(erro_arquivo),
+                    })
+
+                    resultados_individuais.append({
+                        "arquivo_original": arquivo.name,
+                        "nome_saida": nome_saida,
+                        "df_final": pd.DataFrame(),
+                        "info": {"modo": "erro", "falhas": [str(erro_arquivo)]},
+                        "excel": None,
+                        "pdf": None,
+                        "erro": str(erro_arquivo),
+                    })
+
+        st.session_state["resultados_individuais"] = resultados_individuais
+        st.session_state["resumo_processamento_individual"] = pd.DataFrame(resumo_processamento)
+        st.session_state["percentual"] = percentual
+
+        # Limpa estados antigos do fluxo consolidado, caso existam.
+        for chave_estado in ["df_final", "info", "excel", "pdf", "nome_saida", "resumo_processamento"]:
+            st.session_state.pop(chave_estado, None)
+
+        qtd_ok = sum(
+            1 for r in resultados_individuais
+            if isinstance(r.get("df_final"), pd.DataFrame) and not r["df_final"].empty
         )
 
-        st.caption(
-            f"Arquivos gerados: {nome_saida}.xlsx • {nome_saida}.pdf"
-        )
-    nome_saida = nome_seguro(nome_saida)
+        st.success(f"{qtd_ok} lista(s) individual(is) processada(s) com sucesso.")
 
-    if st.button("Gerar Lista com Margem", type="primary", use_container_width=True):
-        try:
-            caminho_upload = salvar_upload(uploaded_file)
+    resultados = st.session_state.get("resultados_individuais", [])
 
-            with st.spinner("Processando arquivo..."):
-                df_final, info = processar_arquivo(caminho_upload, percentual=percentual)
+    if resultados:
+        resultados_validos = [
+            r for r in resultados
+            if isinstance(r.get("df_final"), pd.DataFrame) and not r["df_final"].empty
+        ]
 
-                if df_final.empty:
-                    st.error("Nenhum registro válido foi extraído.")
-                    if info.get("falhas"):
-                        st.warning(f"Linhas não processadas: {len(info['falhas'])}")
-                        renderizar_falhas_processamento(info.get("falhas", []))
-                    return
+        if resultados_validos:
+            with st.container(border=True):
+                st.markdown("### 📦 Download em lote")
+                st.caption(
+                    "Baixe os arquivos individuais em lote. "
+                    "Você pode baixar somente Excel ou somente PDF. "
+                    "Os nomes usados serão os nomes editados em cada lista."
+                )
 
-                caminho_excel = salvar_excel(df_final, nome_arquivo=f"{nome_saida}.xlsx")
-                caminho_pdf = salvar_pdf(df_final, nome_arquivo=f"{nome_saida}.pdf")
+                timestamp_zip = datetime.now().strftime('%Y%m%d_%H%M%S')
+                col_zip_excel, col_zip_pdf = st.columns(2)
 
-                hist_excel, hist_pdf = salvar_historico(caminho_excel, caminho_pdf, nome_saida)
+                with col_zip_excel:
+                    excel_icon = Path("assets/excel_icon.png")
+                    if excel_icon.exists():
+                        st.markdown(
+                            f"""
+                            <div style="text-align:center; margin-bottom:8px;">
+                                <img src="data:image/png;base64,{base64.b64encode(excel_icon.read_bytes()).decode()}" width="42">
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-            st.session_state["df_final"] = df_final
-            st.session_state["info"] = info
-            st.session_state["excel"] = str(hist_excel)
-            st.session_state["pdf"] = str(hist_pdf)
-            st.session_state["nome_saida"] = nome_saida
-            st.session_state["percentual"] = percentual
+                    zip_excel_bytes = montar_zip_resultados_individuais(resultados_validos, tipo="excel")
+                    st.download_button(
+                        "⬇️ Baixar todos Excel (.zip)",
+                        data=zip_excel_bytes,
+                        file_name=f"listas_excel_{timestamp_zip}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                        key="download_zip_excel_individuais_topo",
+                    )
 
-            st.success("Arquivo processado com sucesso.")
+                with col_zip_pdf:
+                    pdf_icon = Path("assets/pdf_icon.png")
+                    if pdf_icon.exists():
+                        st.markdown(
+                            f"""
+                            <div style="text-align:center; margin-bottom:8px;">
+                                <img src="data:image/png;base64,{base64.b64encode(pdf_icon.read_bytes()).decode()}" width="42">
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-        except Exception as e:
-            st.exception(e)
+                    zip_pdf_bytes = montar_zip_resultados_individuais(resultados_validos, tipo="pdf")
+                    st.download_button(
+                        "⬇️ Baixar todos PDF (.zip)",
+                        data=zip_pdf_bytes,
+                        file_name=f"listas_pdf_{timestamp_zip}.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                        key="download_zip_pdf_individuais_topo",
+                    )
 
-    if "df_final" in st.session_state:
-        df_final = st.session_state["df_final"]
-        info = st.session_state.get("info", {})
-        nome_saida = st.session_state.get("nome_saida", "resultado_margem_atualizada")
-        caminho_excel = Path(st.session_state["excel"])
-        caminho_pdf = Path(st.session_state["pdf"])
+        resumo_processamento = st.session_state.get("resumo_processamento_individual")
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Registros", f"{len(df_final):,}".replace(",", "."))
-        c2.metric("Modo", str(info.get("modo", "-")).upper())
-        c3.metric("Falhas", len(info.get("falhas", [])))
-        c4.metric("Acréscimo", f"{st.session_state.get('percentual', percentual):.2f}%".replace(".", ","))
+        if isinstance(resumo_processamento, pd.DataFrame) and not resumo_processamento.empty:
+            with st.expander("Resumo por arquivo processado", expanded=True):
+                st.dataframe(resumo_processamento, use_container_width=True, height=220)
 
-        st.subheader("Prévia")
-
-        preview_df = df_final.copy()
+        st.markdown("## Listas convertidas individualmente")
 
         def formatar_preview_percentual(x):
             try:
@@ -1823,73 +2175,119 @@ def main():
             except Exception:
                 return x
 
-        if "MARGEM FINAL" in preview_df.columns:
-            preview_df["MARGEM FINAL"] = preview_df["MARGEM FINAL"].apply(
-                formatar_preview_percentual
-            )
+        for idx_resultado, resultado in enumerate(resultados):
+            arquivo_original = resultado.get("arquivo_original", "arquivo")
+            nome_padrao_resultado = resultado.get("nome_saida", Path(arquivo_original).stem)
+            df_final = resultado.get("df_final", pd.DataFrame())
+            info = resultado.get("info", {}) or {}
+            erro = resultado.get("erro")
 
-        st.dataframe(preview_df, use_container_width=True, height=420)
+            titulo = f"📄 {arquivo_original}"
 
-        st.markdown("### Downloads")
+            if isinstance(df_final, pd.DataFrame) and not df_final.empty:
+                titulo += f" — {len(df_final)} registro(s)"
+            elif erro:
+                titulo += " — erro"
+            else:
+                titulo += " — sem registros"
 
-        d0, d1, d2, d3 = st.columns([0.22, 0.28, 0.28, 0.22])
+            with st.expander(titulo, expanded=True):
+                if erro:
+                    st.error(f"Erro ao processar este arquivo: {erro}")
+                    renderizar_falhas_processamento(info.get("falhas", []))
+                    continue
 
-        excel_bytes = ler_bytes(caminho_excel)
-        pdf_bytes = ler_bytes(caminho_pdf)
+                if not isinstance(df_final, pd.DataFrame) or df_final.empty:
+                    st.warning("Nenhum registro válido foi extraído desta lista.")
+                    renderizar_falhas_processamento(info.get("falhas", []))
+                    continue
 
-        if excel_bytes:
-            with d1:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Registros", f"{len(df_final):,}".replace(",", "."))
+                c2.metric("Modo", str(info.get("modo", "-")).upper())
+                c3.metric("Falhas", len(info.get("falhas", [])))
+                c4.metric("Acréscimo", f"{st.session_state.get('percentual', percentual):.2f}%".replace(".", ","))
 
-                st.markdown(
-                    f"""
-                    <div style="text-align:center; margin-bottom:8px;">
-                        <img src="data:image/png;base64,{
-                            base64.b64encode(open('assets/excel_icon.png', 'rb').read()).decode()
-                        }" width="42">
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                chave_nome_download = f"nome_download_resultado_{idx_resultado}_{nome_seguro(arquivo_original)}"
+                nome_download = st.text_input(
+                    "Renomear antes do download",
+                    value=nome_padrao_resultado,
+                    key=chave_nome_download,
+                    help="Esse nome será usado nos botões de download desta lista.",
                 )
+                nome_download = nome_seguro(nome_download)
 
-                if st.download_button(
-                    "Baixar Excel",
-                    data=excel_bytes,
-                    file_name=f"{nome_saida}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                ):
-                    st.toast("Download do Excel iniciado.", icon="✅")
+                st.markdown("#### Prévia")
+                preview_df = df_final.copy()
 
-        else:
-            d1.warning("Excel não encontrado.")
+                if "MARGEM FINAL" in preview_df.columns:
+                    preview_df["MARGEM FINAL"] = preview_df["MARGEM FINAL"].apply(
+                        formatar_preview_percentual
+                    )
 
-        if pdf_bytes:
-            with d2:
+                st.dataframe(preview_df, use_container_width=True, height=360)
 
-                st.markdown(
-                    f"""
-                    <div style="text-align:center; margin-bottom:8px;">
-                        <img src="data:image/png;base64,{
-                            base64.b64encode(open('assets/pdf_icon.png', 'rb').read()).decode()
-                        }" width="42">
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                st.markdown("#### Downloads desta lista")
+                d0, d1, d2, d3 = st.columns([0.22, 0.28, 0.28, 0.22])
 
-                if st.download_button(
-                    "Baixar PDF",
-                    data=pdf_bytes,
-                    file_name=f"{nome_saida}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                ):
-                    st.toast("Download do PDF iniciado.", icon="✅")
+                caminho_excel = Path(resultado["excel"]) if resultado.get("excel") else None
+                caminho_pdf = Path(resultado["pdf"]) if resultado.get("pdf") else None
 
-        else:
-            d2.warning("PDF não encontrado.")
+                excel_bytes = ler_bytes(caminho_excel) if caminho_excel else None
+                pdf_bytes = ler_bytes(caminho_pdf) if caminho_pdf else None
 
-        renderizar_falhas_processamento(info.get("falhas", []))
+                if excel_bytes:
+                    with d1:
+                        excel_icon = Path("assets/excel_icon.png")
+                        if excel_icon.exists():
+                            st.markdown(
+                                f"""
+                                <div style="text-align:center; margin-bottom:8px;">
+                                    <img src="data:image/png;base64,{base64.b64encode(excel_icon.read_bytes()).decode()}" width="42">
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+
+                        if st.download_button(
+                            "Baixar Excel",
+                            data=excel_bytes,
+                            file_name=f"{nome_download}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_excel_individual_{idx_resultado}",
+                            use_container_width=True,
+                        ):
+                            st.toast("Download do Excel iniciado.", icon="✅")
+                else:
+                    d1.warning("Excel não encontrado.")
+
+                if pdf_bytes:
+                    with d2:
+                        pdf_icon = Path("assets/pdf_icon.png")
+                        if pdf_icon.exists():
+                            st.markdown(
+                                f"""
+                                <div style="text-align:center; margin-bottom:8px;">
+                                    <img src="data:image/png;base64,{base64.b64encode(pdf_icon.read_bytes()).decode()}" width="42">
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+
+                        if st.download_button(
+                            "Baixar PDF",
+                            data=pdf_bytes,
+                            file_name=f"{nome_download}.pdf",
+                            mime="application/pdf",
+                            key=f"download_pdf_individual_{idx_resultado}",
+                            use_container_width=True,
+                        ):
+                            st.toast("Download do PDF iniciado.", icon="✅")
+                else:
+                    d2.warning("PDF não encontrado.")
+
+                renderizar_falhas_processamento(info.get("falhas", []))
+
 
     renderizar_historico_uploads()
     renderizar_historico()

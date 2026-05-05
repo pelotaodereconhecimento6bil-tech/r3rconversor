@@ -19,6 +19,102 @@ from core.normalizador import (
 from core.validacoes import validar_e_corrigir_registro
 
 
+def _normalizar_nome_cidade_localiza(cidade: str) -> str:
+    cidade = str(cidade or "").upper().strip()
+    cidade = re.sub(r"\s+", " ", cidade)
+
+    correcoes = {
+        "SAO PAULO": "SÃO PAULO",
+        "RIBEIRAO PRETO": "RIBEIRÃO PRETO",
+        "SAO VICENTE": "SÃO VICENTE",
+        "SANTO ANDRE": "SANTO ANDRÉ",
+        "SAO JOSE DO RIO PRETO": "SÃO JOSÉ DO RIO PRETO",
+        "SAO BERNARDO DO CAMPO": "SÃO BERNARDO DO CAMPO",
+        "SAO JOSE DOS CAMPOS": "SÃO JOSÉ DOS CAMPOS",
+        "SAO JOSE DOS CAMPO": "SÃO JOSÉ DOS CAMPOS",
+    }
+
+    return correcoes.get(cidade, cidade)
+
+
+def _extrair_cidade_localiza_ipva(direita: str, moedas, cidade_padrao: str = "SÃO PAULO") -> str:
+    """
+    No layout Localiza IPVA, depois do PREÇO CLIENTE pode vir ENDEREÇO + CIDADE.
+    Esta função preserva a cidade real da linha, em vez de usar sempre a cidade do nome do arquivo.
+    """
+    try:
+        if not moedas or len(moedas) < 4:
+            return _normalizar_nome_cidade_localiza(cidade_padrao)
+
+        texto_final = str(direita[moedas[3].end():] or "").upper().strip()
+        texto_final = normalizar_linha(texto_final)
+        texto_final = re.sub(r"\s+", " ", texto_final).strip()
+
+        if not texto_final:
+            return _normalizar_nome_cidade_localiza(cidade_padrao)
+
+        # Cidades observadas nos modelos Localiza com ENDEREÇO/CIDADE e variações sem acento.
+        cidades_conhecidas = [
+            "SÃO BERNARDO DO CAMPO",
+            "SAO BERNARDO DO CAMPO",
+            "SÃO JOSÉ DO RIO PRETO",
+            "SAO JOSE DO RIO PRETO",
+            "SÃO JOSÉ DOS CAMPOS",
+            "SAO JOSE DOS CAMPOS",
+            "RIBEIRÃO PRETO",
+            "RIBEIRAO PRETO",
+            "SANTO ANDRÉ",
+            "SANTO ANDRE",
+            "SÃO VICENTE",
+            "SAO VICENTE",
+            "GUARULHOS",
+            "PIRACICABA",
+            "SOROCABA",
+            "BAURU",
+            "OSASCO",
+            "CAMPINAS",
+            "ARARAQUARA",
+            "SAO PAULO",
+            "SÃO PAULO",
+            "BARUERI",
+            "MARÍLIA",
+            "MARILIA",
+            "PRESIDENTE PRUDENTE",
+        ]
+
+        for cidade in sorted(cidades_conhecidas, key=len, reverse=True):
+            if re.search(rf"(?:^|\s){re.escape(cidade)}$", texto_final):
+                return _normalizar_nome_cidade_localiza(cidade)
+
+        # Fallback genérico: pega as últimas palavras após o endereço, removendo termos de logradouro.
+        tokens = texto_final.split()
+        palavras_rua = {
+            "AVENIDA", "AV", "AV.", "RUA", "RODOVIA", "ROD", "ROD.",
+            "ESTRADA", "KM", "SHOP", "SHOPPING", "PISO", "LAJE", "SN", "S/N",
+        }
+
+        candidatos = []
+        for token in reversed(tokens):
+            token_limpo = re.sub(r"[^A-ZÁÀÂÃÉÊÍÓÔÕÚÇ]", "", token)
+            if not token_limpo or token_limpo in palavras_rua or token_limpo.isdigit():
+                if candidatos:
+                    break
+                continue
+            candidatos.append(token_limpo)
+            if len(candidatos) >= 4:
+                break
+
+        if candidatos:
+            cidade = " ".join(reversed(candidatos)).strip()
+            cidade = _normalizar_nome_cidade_localiza(cidade)
+            if cidade:
+                return cidade
+
+        return _normalizar_nome_cidade_localiza(cidade_padrao)
+    except Exception:
+        return _normalizar_nome_cidade_localiza(cidade_padrao)
+
+
 def _parsear_linha_localiza_ipva(linha_bruta: str, cidade_padrao: str = "SÃO PAULO"):
     linha = normalizar_linha(str(linha_bruta or ""))
 
@@ -85,11 +181,19 @@ def _parsear_linha_localiza_ipva(linha_bruta: str, cidade_padrao: str = "SÃO PA
     if len(moedas) < 4:
         return None
 
+    # Layout IPVA: FIPE | MARGEM R$ | % MARGEM | GANHO IPVA | PREÇO CLIENTE
     fipe = valor_localiza_para_float(moedas[0].group())
-    preco_base = valor_localiza_para_float(moedas[-1].group())
+    ganho_ipva = valor_localiza_para_float(moedas[2].group())
+    preco_base = valor_localiza_para_float(moedas[3].group())
 
-    if fipe is None or preco_base is None:
+    if fipe is None or preco_base is None or ganho_ipva is None:
         return None
+
+    cidade = _extrair_cidade_localiza_ipva(
+        direita=direita,
+        moedas=moedas,
+        cidade_padrao=cidade_padrao,
+    )
 
     registro = {
         "PLACA": placa,
@@ -99,8 +203,9 @@ def _parsear_linha_localiza_ipva(linha_bruta: str, cidade_padrao: str = "SÃO PA
         "KM": km,
         "COR": cor,
         "FIPE": fipe,
+        "GANHO IPVA": ganho_ipva,
         "UF": "SP",
-        "CIDADE": cidade_padrao,
+        "CIDADE": cidade,
         "PREÇO ORIGINAL": preco_base,
     }
 
@@ -313,6 +418,8 @@ def montar_dataframe_localiza(caminho_pdf: Path):
             "PREÇO CLIENTE",
             "FIPE",
             "GANHO IPVA",
+            "CIDADE",
+            "ENDEREÇO",
         }
 
     df_original, falhas_original = montar_dataframe_localiza_original(caminho_pdf)
