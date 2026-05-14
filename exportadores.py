@@ -372,12 +372,19 @@ def _detectar_origem_pdf(df: pd.DataFrame) -> str:
                 return "localiza"
             if "movida" in valor:
                 return "movida"
+            if "utilitarios" in valor:
+                return "utilitarios"
             if "unidas" in valor:
                 return "unidas"
 
         colunas = {str(c).upper().strip() for c in df.columns}
 
         if "LAUDO CAUTELAR" in colunas or "LINK LAUDO" in colunas:
+            origem_attr = str(df.attrs.get("origem", "") or "").lower()
+
+            if "utilitarios" in origem_attr:
+                 return "utilitarios"
+
             return "movida"
 
         if "GANHO IPVA" in colunas:
@@ -452,7 +459,24 @@ def _larguras_pdf_por_coluna(colunas, origem=None):
             "DIST FIPE FINAL": 20 * mm,
             "MARGEM FINAL": 14 * mm,
         },
+    
+
+        "utilitarios": {   
+            "MODELO": 43 * mm,
+            "COR": 15 * mm,
+            "CIDADE": 26 * mm,
+            "PREÇO FINAL": 17 * mm,
+            "DIST FIPE FINAL": 17 * mm,
+            "MARGEM FINAL": 12 * mm,
+            "LAUDO CAUTELAR": 22 * mm,
+            "LINK LAUDO": 14 * mm,
+        },
     }
+    
+
+
+
+
 
     mapa = dict(mapa_base)
     mapa.update(ajustes_por_origem.get(origem, {}))

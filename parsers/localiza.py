@@ -256,6 +256,46 @@ def montar_dataframe_localiza_ipva(caminho_pdf: Path):
     return pd.DataFrame(registros), falhas
 
 
+def _extrair_cidade_localiza_original(local: str) -> str:
+    texto = str(local or "").upper().strip()
+    texto = normalizar_linha(texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+
+    cidades_conhecidas = [
+        "SÃO BERNARDO DO CAMPO",
+        "SAO BERNARDO DO CAMPO",
+        "SÃO JOSÉ DO RIO PRETO",
+        "SAO JOSE DO RIO PRETO",
+        "SÃO JOSÉ DOS CAMPOS",
+        "SAO JOSE DOS CAMPOS",
+        "RIBEIRÃO PRETO",
+        "RIBEIRAO PRETO",
+        "PRESIDENTE PRUDENTE",
+        "SANTO ANDRÉ",
+        "SANTO ANDRE",
+        "SÃO VICENTE",
+        "SAO VICENTE",
+        "SÃO PAULO",
+        "SAO PAULO",
+        "GUARULHOS",
+        "PIRACICABA",
+        "SOROCABA",
+        "BAURU",
+        "OSASCO",
+        "CAMPINAS",
+        "ARARAQUARA",
+        "BARUERI",
+        "MARÍLIA",
+        "MARILIA",
+    ]
+
+    for cidade in sorted(cidades_conhecidas, key=len, reverse=True):
+        if texto.startswith(cidade + " ") or texto == cidade:
+            return _normalizar_nome_cidade_localiza(cidade)
+
+    return ""
+
+
 def _parsear_linha_localiza_original(linha_bruta: str):
     linha = normalizar_linha(str(linha_bruta or ""))
 
@@ -342,7 +382,10 @@ def _parsear_linha_localiza_original(linha_bruta: str):
     uf = m_margem.group("uf").upper().strip()
     local = m_margem.group("local").strip()
 
-    cidade = normalizar_cidade_sem_endereco(local)
+    cidade = _extrair_cidade_localiza_original(local)
+
+    if not cidade:
+        cidade = normalizar_cidade_sem_endereco(local)
 
     if not cidade:
         cidade = limpar_cidade(local)

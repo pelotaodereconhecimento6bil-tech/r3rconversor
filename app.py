@@ -7,6 +7,7 @@ from core.constantes import COLUNAS_FINAIS
 from parsers.localiza import montar_dataframe_localiza
 from parsers.movida import montar_dataframe_movida
 from parsers.unidas import montar_dataframe_unidas
+from parsers.utilitarios import montar_dataframe_utilitarios
 from parsers.generico import montar_dataframe_generico
 from parsers.tabela_final import (
     montar_dataframe_tabela_final,
@@ -424,6 +425,25 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "VALOR C DESCONTO",
         }
 
+
+    df_utilitarios, falhas_utilitarios = montar_dataframe_utilitarios(caminho_pdf)
+    total_utilitarios = len(df_utilitarios) + len(falhas_utilitarios)
+    taxa_utilitarios = (len(df_utilitarios) / total_utilitarios) if total_utilitarios else 0
+
+    if len(df_utilitarios) > 0 and taxa_utilitarios >= 0.70:
+        return df_utilitarios, falhas_utilitarios, "utilitarios", {
+            "PLACA",
+            "LOJA",
+            "CIDADE",
+            "MODELO",
+            "FIPE",
+            "MARGEM",
+            "PREÇO",
+            "LAUDO",
+            "LINK",
+        }
+
+
     df_movida, falhas_movida = montar_dataframe_movida(caminho_pdf)
     total_movida = len(df_movida) + len(falhas_movida)
     taxa_movida = (len(df_movida) / total_movida) if total_movida else 0
@@ -490,6 +510,17 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "unidas",
             {"TIPO VENDA", "VALOR FIPE", "VALOR C DESCONTO"},
         ),
+
+            
+
+        (
+            len(df_utilitarios),
+            df_utilitarios,
+            falhas_utilitarios,
+            "utilitarios",
+            {"PLACA","LOJA","CIDADE","MODELO","FIPE","MARGEM","PREÇO","LAUDO","LINK",},
+        ),
+
 
         (
             len(df_movida),
@@ -818,69 +849,71 @@ def salvar_excel(df: pd.DataFrame, nome_arquivo=None):
 
 
 def normalizar_cor_pdf(valor):
-    """Reduz nomes comerciais de cor para evitar invasão no PDF.
-
-    Ex.: BRANCO BANCHISA -> BRANCO; CINZA SILVERSTONE -> CINZA.
-    Mantém apenas a cor base, sem alterar cálculo nem Excel.
-    """
     texto = str(valor or "").upper().strip()
-    texto = " ".join(texto.split())
+    texto = re.sub(r"\s+", " ", texto)
 
-    if not texto:
-        return ""
-
-    # Correção de casos onde o extrator juntou a cor com o próximo campo monetário.
-    texto = texto.replace("R$", "")
-    texto = texto.replace("SILVERSTONER", "SILVERSTONE")
-
-    mapa_cores = {
-        "BRANCO BANCHISA": "BRANCO",
-        "BRANCO BANQUISE": "BRANCO",
-        "BRANCO ATLAS": "BRANCO",
-        "BRANCO POLAR": "BRANCO",
-        "BRANCO GLACIER": "BRANCO",
-        "BRANCO CRISTAL": "BRANCO",
-        "PRETO VULCANO": "PRETO",
-        "PRETO ONIX": "PRETO",
-        "PRETO CARBON": "PRETO",
-        "PRETO NACRE": "PRETO",
-        "PRETO OURO": "PRETO",
-        "PRETO OURO NEGRO": "PRETO",
-        "CINZA SILVERSTONE": "CINZA",
-        "CINZA SILVERSTONER": "CINZA",
-        "CINZA SILK": "CINZA",
-        "CINZA GRANITE": "CINZA",
-        "CINZA PLATINUM": "CINZA",
-        "CINZA ARTENSE": "CINZA",
-        "PRATA BRISK": "PRATA",
-        "PRATA BARI": "PRATA",
-        "PRATA SAND": "PRATA",
-        "PRATA ETOILE": "PRATA",
-        "PRATA BILLET": "PRATA",
-        "AZUL JAZZ": "AZUL",
-        "AZUL BOREAL": "AZUL",
-        "AZUL SAPPHIRE": "AZUL",
-        "AZUL ECLIPSE": "AZUL",
-        "VERMELHO CHILI": "VERMELHO",
-        "VERDE SAFARI": "VERDE",
-        "AMARELA": "AMARELO",
+    valores_invalidos = {
+        "", "-", "--", "---", "NAN", "NONE", "NULL", "N/I", "?",
+        "SEM COR", "NÃO INFORMADA", "NAO INFORMADA", "NÃO INFORMADO", "NAO INFORMADO",
     }
 
-    if texto in mapa_cores:
-        return mapa_cores[texto]
+    if texto in valores_invalidos:
+        return "NÃO INFORMADO"
 
-    # Fallback: conserva apenas a cor base quando vier com nome comercial.
-    primeira = texto.split()[0]
-    cores_base = {
-        "BRANCO", "BRANCA", "PRETO", "PRETA", "CINZA", "PRATA",
-        "AZUL", "VERMELHO", "VERMELHA", "VERDE", "AMARELO", "AMARELA",
-        "MARROM"
+    texto = texto.replace(" - SÓLIDA", "")
+    texto = texto.replace(" - SOLIDA", "")
+    texto = texto.replace(" - METÁLICA", "")
+    texto = texto.replace(" - METALICA", "")
+    texto = texto.replace(" BICOLOR", " C/ TETO PRETO")
+
+    COR_ALIAS = {
+        "BRANCA": "BRANCO",
+        "PRETA": "PRETO",
+
+        "BRANCO BANQUISE": "BRANCO BANCHISA",
+        "BRANCO BANQUISA": "BRANCO BANCHISA",
+        "BRANCO BANCHIZA": "BRANCO BANCHISA",
+
+        "BRANCO SUMMIT": "BRANCO SUMMIT",
+        "PRETO CARBOM": "PRETO CARBON",
+        "SILVER STONE": "CINZA SILVERSTONE",
+
+        "CINZA GRANITE COM TETO PRETO": "CINZA GRANITE C/ TETO PRETO",
+        "CINZA GRANITE TETO PRETO": "CINZA GRANITE C/ TETO PRETO",
+        "CINZA GRANITE C/ TETO PRETO": "CINZA GRANITE C/ TETO PRETO",
     }
 
-    if primeira in cores_base:
-        return primeira.replace("BRANCA", "BRANCO").replace("PRETA", "PRETO").replace("VERMELHA", "VERMELHO").replace("AMARELA", "AMARELO")
+    texto = COR_ALIAS.get(texto, texto)
 
-    return texto[:10]
+    CORES_BASE = {
+        "BRANCO", "BRANCO BANCHISA", "BRANCO GELEIRA", "BRANCO POLAR", "BRANCO SUMMIT",
+        "PRETO", "PRETO VULCANO", "PRETO CARBON", "PRETO MITO", "PRETO PERLA NERA",
+        "CINZA", "CINZA SILVERSTONE", "CINZA GRANITE", "CINZA GRANITE C/ TETO PRETO", "CINZA ARTENSE",
+        "PRATA", "PRATA BARI", "PRATA BILLET", "PRATA BILLET C/ TETO PRETO",
+        "AZUL", "AZUL JAZZ",
+        "VERDE",
+    }
+
+    if texto in CORES_BASE:
+        return texto
+
+    if re.search(r"[A-ZÁÉÍÓÚÃÕÇ]", texto):
+        return texto
+
+    return "NÃO INFORMADO"
+
+
+def obter_estilo_cor(texto):
+    tamanho = len(str(texto or ""))
+
+    if tamanho <= 10:
+        return 5.8, 6.6
+    elif tamanho <= 18:
+        return 5.2, 6.0
+    elif tamanho <= 26:
+        return 4.6, 5.2
+
+    return 4.1, 4.8
 
 def preparar_dados_pdf(df: pd.DataFrame):
     df_pdf = df.copy()
@@ -925,14 +958,58 @@ def preparar_dados_pdf(df: pd.DataFrame):
             .apply(normalizar_cor_pdf)
         )
 
+    def limpar_cidade_pdf(valor):
+        texto = str(valor or "").strip()
+        texto = re.sub(r"\s+", " ", texto)
+
+        if not texto:
+            return ""
+
+        texto_upper = texto.upper()
+
+        cidades_conhecidas = [
+            "SÃO BERNARDO DO CAMPO",
+            "SAO BERNARDO DO CAMPO",
+            "SÃO JOSÉ DO RIO PRETO",
+            "SAO JOSE DO RIO PRETO",
+            "SÃO JOSÉ DOS CAMPOS",
+            "SAO JOSE DOS CAMPOS",
+            "PRESIDENTE PRUDENTE",
+            "RIBEIRÃO PRETO",
+            "RIBEIRAO PRETO",
+            "SANTO ANDRÉ",
+            "SANTO ANDRE",
+            "SÃO PAULO",
+            "SAO PAULO",
+            "GUARULHOS",
+            "PIRACICABA",
+            "SOROCABA",
+            "BAURU",
+            "OSASCO",
+            "CAMPINAS",
+            "BARUERI",
+        ]
+
+        cidade_corrigida = texto_upper
+
+        for cidade in sorted(cidades_conhecidas, key=len, reverse=True):
+            if texto_upper.startswith(cidade):
+                cidade_corrigida = cidade
+                break
+
+        correcoes = {
+            "SAO PAULO": "SÃO PAULO",
+            "SAO BERNARDO DO CAMPO": "SÃO BERNARDO DO CAMPO",
+            "SAO JOSE DO RIO PRETO": "SÃO JOSÉ DO RIO PRETO",
+            "SAO JOSE DOS CAMPOS": "SÃO JOSÉ DOS CAMPOS",
+            "RIBEIRAO PRETO": "RIBEIRÃO PRETO",
+            "SANTO ANDRE": "SANTO ANDRÉ",
+        }
+
+        return correcoes.get(cidade_corrigida, cidade_corrigida)
+
     if "CIDADE" in df_pdf.columns:
-        df_pdf["CIDADE"] = (
-            df_pdf["CIDADE"]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.slice(0, 24)
-        )
+        df_pdf["CIDADE"] = df_pdf["CIDADE"].apply(limpar_cidade_pdf)
 
     for coluna in ["LAUDO CAUTELAR", "LINK LAUDO"]:
         if coluna in df_pdf.columns:
@@ -944,6 +1021,7 @@ def preparar_dados_pdf(df: pd.DataFrame):
             )
 
     return df_pdf
+
 
 def obter_logo_streamlit_path():
     caminhos = [
@@ -978,7 +1056,7 @@ def _formatar_celula_pdf(valor, coluna):
     if coluna == "LINK LAUDO" and valor_txt.startswith("http"):
         url = escape(valor_txt, {'"': '&quot;'})
         return Paragraph(
-            f'<link href="{url}"><font color="blue"><u>Abrir laudo</u></font></link>'
+            f'<link href="{url}"><font color="blue" size="8"><u>Abrir laudo</u></font></link>'
         )
 
     return valor_txt
@@ -992,7 +1070,22 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
     caminho_saida = PASTA_SAIDA / nome_arquivo
 
     df_pdf = preparar_dados_pdf(df).copy()
-    movida = "LAUDO CAUTELAR" in df_pdf.columns or "LINK LAUDO" in df_pdf.columns
+
+    origem_pdf = str(df.attrs.get("origem", "") or "").lower().strip()
+
+    if "ORIGEM" in df_pdf.columns:
+        origem_pdf = (
+            df_pdf["ORIGEM"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .iloc[0]
+        )
+
+    movida = (
+        "LAUDO CAUTELAR" in df_pdf.columns
+        or "LINK LAUDO" in df_pdf.columns
+    )
 
     if movida:
         colunas_pdf = [
@@ -1046,13 +1139,28 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
         "FIPE": 24 * mm,
         "GANHO IPVA": 24 * mm,
         "UF": 7 * mm,
-        "CIDADE": 24 * mm,
-        "PREÇO FINAL": 34 * mm,
-        "DIST FIPE FINAL": 31 * mm,
-        "MARGEM FINAL": 20 * mm,
+        "CIDADE": 30 * mm,
+        "PREÇO FINAL": 32 * mm,
+        "DIST FIPE FINAL": 29 * mm,
+        "MARGEM FINAL": 18 * mm,
         "LAUDO CAUTELAR": 15 * mm,
         "LINK LAUDO": 22 * mm,
     }
+
+    if origem_pdf == "utilitarios":
+
+        larguras_por_coluna.update({
+
+        "PREÇO FINAL": 26 * mm,
+
+        "DIST FIPE FINAL": 24 * mm,
+
+        "MARGEM FINAL": 16 * mm,
+
+        "LAUDO CAUTELAR": 28 * mm,
+
+        "LINK LAUDO": 14 * mm,
+    })
 
     col_widths = [
         larguras_por_coluna.get(coluna, 18 * mm)
@@ -1141,16 +1249,27 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
             idx_fipe = cabecalho.index("FIPE")
             estilos.append(("FONTNAME", (idx_fipe, 1), (idx_fipe, -1), "Helvetica-Bold"))
 
-        for nome_coluna in ["MODELO", "COR"]:
-            if nome_coluna in cabecalho:
-                idx_col = cabecalho.index(nome_coluna)
-                estilos.append(("ALIGN", (idx_col, 1), (idx_col, -1), "LEFT"))
+        if "MODELO" in cabecalho:
+            idx_modelo = cabecalho.index("MODELO")
+            estilos.append(("ALIGN", (idx_modelo, 1), (idx_modelo, -1), "LEFT"))
 
         if "COR" in cabecalho:
             idx_cor = cabecalho.index("COR")
-            estilos.append(("FONTSIZE", (idx_cor, 1), (idx_cor, -1), 5.6))
-            estilos.append(("LEADING", (idx_cor, 1), (idx_cor, -1), 6.4))
+
+            for linha_pdf in range(1, len(bloco) + 1):
+                valor_cor = bloco[linha_pdf - 1][idx_cor]
+                fonte, leading = obter_estilo_cor(valor_cor)
+
+                estilos.append(("FONTSIZE", (idx_cor, linha_pdf), (idx_cor, linha_pdf), fonte))
+                estilos.append(("LEADING", (idx_cor, linha_pdf), (idx_cor, linha_pdf), leading))
+
             estilos.append(("ALIGN", (idx_cor, 1), (idx_cor, -1), "CENTER"))
+
+        if "CIDADE" in cabecalho:
+            idx_cidade = cabecalho.index("CIDADE")
+            estilos.append(("FONTSIZE", (idx_cidade, 1), (idx_cidade, -1), 5.6))
+            estilos.append(("LEADING", (idx_cidade, 1), (idx_cidade, -1), 6.3))
+            estilos.append(("ALIGN", (idx_cidade, 1), (idx_cidade, -1), "CENTER"))
 
         tabela.setStyle(TableStyle(estilos))
         elementos.append(tabela)
@@ -1341,6 +1460,7 @@ def processar_arquivo(caminho: Path, percentual: float):
         }
 
     df_final = aplicar_regras(df, percentual=percentual)
+    df_final.attrs["origem"] = modo_usado
 
     return df_final, {
         "modo": modo_usado,
