@@ -8,6 +8,7 @@ from parsers.localiza import montar_dataframe_localiza
 from parsers.movida import montar_dataframe_movida
 from parsers.unidas import montar_dataframe_unidas
 from parsers.utilitarios import montar_dataframe_utilitarios
+from parsers.estado_sp import montar_dataframe_estado_sp
 from parsers.generico import montar_dataframe_generico
 from parsers.tabela_final import (
     montar_dataframe_tabela_final,
@@ -405,13 +406,15 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
 
     Ordem:
     1. Unidas
-    2. Movida
-    3. Localiza
-    4. tabela_pdf
-    5. tabela_final
-    6. flexível
-    7. genérico inteligente
-    8. rígido
+    2. Utilitários
+    3. Estado SP
+    4. Movida
+    5. Localiza
+    6. tabela_pdf
+    7. tabela_final
+    8. flexível
+    9. genérico inteligente
+    10. rígido
     """
 
     df_unidas, falhas_unidas = montar_dataframe_unidas(caminho_pdf)
@@ -424,7 +427,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "VALOR FIPE",
             "VALOR C DESCONTO",
         }
-
 
     df_utilitarios, falhas_utilitarios = montar_dataframe_utilitarios(caminho_pdf)
     total_utilitarios = len(df_utilitarios) + len(falhas_utilitarios)
@@ -443,6 +445,24 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "LINK",
         }
 
+    df_estado_sp, falhas_estado_sp = montar_dataframe_estado_sp(caminho_pdf)
+    total_estado_sp = len(df_estado_sp) + len(falhas_estado_sp)
+    taxa_estado_sp = (len(df_estado_sp) / total_estado_sp) if total_estado_sp else 0
+
+    if len(df_estado_sp) > 0 and taxa_estado_sp >= 0.70:
+        return df_estado_sp, falhas_estado_sp, "estado_sp", {
+            "PLACA",
+            "MODELO",
+            "CIDADE",
+            "LAUDO CAUTELAR",
+            "LINK LAUDO",
+        }
+
+    if len(falhas_estado_sp) > 0 and len(df_estado_sp) == 0:
+        raise ValueError(
+            "Layout Estado SP detectado, mas nenhum registro foi convertido. "
+            "Não será usado parser genérico para evitar saída incorreta."
+        )
 
     df_movida, falhas_movida = montar_dataframe_movida(caminho_pdf)
     total_movida = len(df_movida) + len(falhas_movida)
@@ -482,7 +502,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
     if len(df_flex) > 0 and taxa_flex >= 0.75:
         return df_flex, falhas_flex, "flexivel", colunas_presentes
 
-    # NOVO MOTOR GENÉRICO
     df_generico, falhas_generico = montar_dataframe_generico(caminho_pdf)
     total_generico = len(df_generico) + len(falhas_generico)
     taxa_generico = (len(df_generico) / total_generico) if total_generico else 0
@@ -510,18 +529,20 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "unidas",
             {"TIPO VENDA", "VALOR FIPE", "VALOR C DESCONTO"},
         ),
-
-            
-
         (
             len(df_utilitarios),
             df_utilitarios,
             falhas_utilitarios,
             "utilitarios",
-            {"PLACA","LOJA","CIDADE","MODELO","FIPE","MARGEM","PREÇO","LAUDO","LINK",},
+            {"PLACA", "LOJA", "CIDADE", "MODELO", "FIPE", "MARGEM", "PREÇO", "LAUDO", "LINK"},
         ),
-
-
+        (
+            len(df_estado_sp),
+            df_estado_sp,
+            falhas_estado_sp,
+            "estado_sp",
+            {"PLACA", "MODELO", "CIDADE", "LAUDO CAUTELAR", "LINK LAUDO"},
+        ),
         (
             len(df_movida),
             df_movida,
@@ -529,7 +550,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "movida",
             {"FIPE", "ANUNCIO_ATACADO", "LAUDO CAUTELAR", "LINK LAUDO"},
         ),
-
         (
             len(df_tabela_pdf),
             df_tabela_pdf,
@@ -537,7 +557,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "tabela_pdf",
             {"PREÇO_FINAL_INFORMADO"},
         ),
-
         (
             len(df_final),
             df_final,
@@ -545,7 +564,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "tabela_final",
             {"PREÇO_FINAL_INFORMADO"},
         ),
-
         (
             len(df_flex),
             df_flex,
@@ -553,7 +571,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "flexivel",
             colunas_presentes,
         ),
-
         (
             len(df_generico),
             df_generico,
@@ -561,7 +578,6 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
             "generico",
             {"PLACA", "MODELO", "FIPE", "PREÇO ORIGINAL"},
         ),
-
         (
             len(df_rig),
             df_rig,
@@ -573,20 +589,9 @@ def montar_dataframe_inteligente(caminho_pdf: Path):
 
     candidatos.sort(key=lambda item: item[0], reverse=True)
 
-    (
-        _,
-        melhor_df,
-        melhores_falhas,
-        melhor_modo,
-        melhores_colunas,
-    ) = candidatos[0]
+    _, melhor_df, melhores_falhas, melhor_modo, melhores_colunas = candidatos[0]
 
-    return (
-        melhor_df,
-        melhores_falhas,
-        melhor_modo,
-        melhores_colunas,
-    )
+    return melhor_df, melhores_falhas, melhor_modo, melhores_colunas
 
 def _coluna_tem_valor_real(df: pd.DataFrame, coluna: str) -> bool:
     """Retorna True quando a coluna existe e tem pelo menos um valor real.
@@ -988,6 +993,18 @@ def preparar_dados_pdf(df: pd.DataFrame):
             "OSASCO",
             "CAMPINAS",
             "BARUERI",
+            "INDAIATUBA",
+            "MOGI MIRIM",
+            "PRAIA GRANDE",
+            "MARILIA",
+            "MARÍLIA",
+            "JUNDIAI",
+            "JUNDIAÍ",
+            "SUZANO",
+            "SAO VICENTE",
+            "SÃO VICENTE",
+            "ARARAS",
+            "ARARAQUARA",
         ]
 
         cidade_corrigida = texto_upper
@@ -1019,6 +1036,17 @@ def preparar_dados_pdf(df: pd.DataFrame):
                 .astype(str)
                 .str.strip()
             )
+
+    if "LAUDO CAUTELAR" in df_pdf.columns:
+        df_pdf["LAUDO CAUTELAR"] = (
+            df_pdf["LAUDO CAUTELAR"]
+            .astype(str)
+            .str.replace(
+                "Aprovado com apontamento",
+                "Aprov c/ apto",
+                regex=False,
+            )
+        )
 
     return df_pdf
 
@@ -1094,6 +1122,9 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
             "LAUDO CAUTELAR", "LINK LAUDO",
         ]
 
+        if origem_pdf == "estado_sp" and "CIDADE" in df_pdf.columns:
+            colunas_pdf.insert(colunas_pdf.index("PREÇO FINAL"), "CIDADE")
+
         # GANHO IPVA só entra no PDF se realmente existir no DataFrame.
         if _coluna_tem_valor_real(df_pdf, "GANHO IPVA"):
             colunas_pdf.insert(colunas_pdf.index("PREÇO FINAL"), "GANHO IPVA")
@@ -1103,7 +1134,8 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
                 df_pdf[coluna] = ""
         df_pdf = df_pdf[colunas_pdf]
     else:
-        if "MODELO" in df_pdf.columns:
+        df_pdf = df_pdf.copy()
+    if "MODELO" in df_pdf.columns:
             df_pdf["MODELO"] = (
                 df_pdf["MODELO"]
                 .fillna("")
@@ -1267,9 +1299,25 @@ def salvar_pdf(df: pd.DataFrame, nome_arquivo=None):
 
         if "CIDADE" in cabecalho:
             idx_cidade = cabecalho.index("CIDADE")
-            estilos.append(("FONTSIZE", (idx_cidade, 1), (idx_cidade, -1), 5.6))
-            estilos.append(("LEADING", (idx_cidade, 1), (idx_cidade, -1), 6.3))
+
             estilos.append(("ALIGN", (idx_cidade, 1), (idx_cidade, -1), "CENTER"))
+
+            for linha_pdf in range(1, len(bloco) + 1):
+                cidade = str(bloco[linha_pdf - 1][idx_cidade])
+
+                fonte = 5.6
+                leading = 6.3
+
+                if len(cidade) > 18:
+                    fonte = 5.0
+                    leading = 5.8
+
+                if len(cidade) > 24:
+                    fonte = 4.5
+                    leading = 5.2
+
+                estilos.append(("FONTSIZE", (idx_cidade, linha_pdf), (idx_cidade, linha_pdf), fonte))
+                estilos.append(("LEADING", (idx_cidade, linha_pdf), (idx_cidade, linha_pdf), leading))
 
         tabela.setStyle(TableStyle(estilos))
         elementos.append(tabela)
