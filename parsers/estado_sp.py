@@ -121,19 +121,28 @@ def _separar_final_estado_sp(resto):
     endereco = resto
     resto_upper = resto.upper()
 
-    cidades_ordenadas = sorted(CIDADES_ESTADO_SP, key=len, reverse=True)
+    melhor_match = None
+    melhor_cidade = ""
 
-    for cid in cidades_ordenadas:
+    for cid in CIDADES_ESTADO_SP:
         cid_upper = cid.upper()
         padrao = rf"\b{re.escape(cid_upper)}\b"
 
-        matches = list(re.finditer(padrao, resto_upper))
+        for match in re.finditer(padrao, resto_upper):
+            if (
+                melhor_match is None
+                or match.start() > melhor_match.start()
+                or (
+                    match.start() == melhor_match.start()
+                    and len(cid_upper) > len(melhor_cidade)
+                )
+            ):
+                melhor_match = match
+                melhor_cidade = cid
 
-        if matches:
-            ultimo = matches[-1]
-            cidade = _normalizar_cidade_estado_sp(cid)
-            endereco = resto[: ultimo.start()].strip()
-            break
+    if melhor_match:
+        cidade = _normalizar_cidade_estado_sp(melhor_cidade)
+        endereco = resto[: melhor_match.start()].strip()
 
     return endereco, cidade, laudo, link
 
@@ -200,7 +209,7 @@ def _parsear_registro_estado_sp(linha):
         "COR": limpar_cor_tabela_pdf(match.group("cor")),
         "FIPE": _valor_estado_sp(match.group("fipe")),
         "UF": "SP",
-        "CIDADE": limpar_cidade(cidade) if cidade else "",
+        "CIDADE": cidade if cidade else "",
         "PREÇO ORIGINAL": _valor_estado_sp(match.group("preco")),
         "LAUDO CAUTELAR": "" if laudo == "0" else laudo,
         "LINK LAUDO": "" if link == "0" else link,
